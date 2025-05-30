@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>大文件上传</title>
+  <link rel="stylesheet" href="./css/index.css" />
+  <!-- 如果CND失效，可以下载到本地 -->
+  <!-- Vue2 -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/vue/2.6.14/vue.js"></script>
+  <!-- Axios -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.2/axios.min.js"></script>
+  <!-- SparkMD5 -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
+</head>
+
+<body>
+  <div id="app">
+    <div class="upload-container" @dragover.prevent @dragenter.prevent="handleDragEnter"
+      @dragleave.prevent="handleDragLeave" @drop.prevent="handleDrop" :class="{ 'is-dragover': isDragover }">
+      <div class="file-upload-wrapper">
+        <input type="file" class="file-upload-input" @change="handleFileChange"
+          :disabled="uploadStatus === uploadStatusEnum.UPLOADING" />
+        <div class="file-upload-button">
+          <span v-if="!isDragover">选择文件 或 拖拽文件到此处</span>
+          <span v-else>释放文件以上传</span>
+        </div>
+        <div v-if="file" class="file-name">已选择: {{ file.name }}</div>
+      </div>
+      <div class="upload-actions">
+        <button @click="handleButtonClick" :disabled="!file || uploadStatus === uploadStatusEnum.SUCCESS"
+          :class="['btn-' + getButtonStyle]">
+          {{ getButtonText }}
+        </button>
+      </div>
+      <div v-if="uploadStatus !== uploadStatusEnum.READY" class="upload-progress">
+        <div class="progress-bar" :style="{ width: uploadProgress + '%' }" />
+        <span>{{ uploadProgress }}%</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    console.error = () => { };
+    // 文件切片大小：2MB
+    const CHUNK_SIZE = 2 * 1024 * 1024;
+
+    // 上传状态枚举
+    const UPLOAD_STATUS = {
+      READY: 'ready', // 准备上传
+      UPLOADING: 'uploading', // 上传中
+      PAUSED: 'paused', // 已暂停
+      SUCCESS: 'success', // 上传成功
+      ERROR: 'error', // 上传失败
+    };
+
+    // 状态对应的按钮文本
+    const STATUS_TEXT = {
+      [UPLOAD_STATUS.READY]: '上传',
+      [UPLOAD_STATUS.UPLOADING]: '暂停',
+      [UPLOAD_STATUS.PAUSED]: '继续',
+      [UPLOAD_STATUS.SUCCESS]: '上传完成',
+      [UPLOAD_STATUS.ERROR]: '重试',
+    };
+
+    // 状态对应的按钮样式
+    const STATUS_STYLE = {
+      [UPLOAD_STATUS.READY]: 'primary',
+      [UPLOAD_STATUS.UPLOADING]: 'warning',
+      [UPLOAD_STATUS.PAUSED]: 'primary',
+      [UPLOAD_STATUS.SUCCESS]: 'success',
+      [UPLOAD_STATUS.ERROR]: 'danger',
+    };
+
+    new Vue({
+      el: '#app',
+      data() {
+        return {
+          file: null,
+          uploadProgress: 0,
+          uploadStatus: UPLOAD_STATUS.READY,
+          uploadStatusEnum: UPLOAD_STATUS,
+          controller: null,
+          isDragover: false,
+          uploadedChunks: [], // 记录已上传的切片
+        };
+      },
+      computed: {
+        getButtonText() {
+          return STATUS_TEXT[this.uploadStatus];
+        },
+        getButtonStyle() {
+          return STATUS_STYLE[this.uploadStatus];
+        },
+      },
+      methods: {
+        // 计算文件hash
+        async calculateHash(file) {
+          return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.readAsArrayBuffer(file);
+            reader.onload = (e) => {
+              const buffer = e.target.result;
+              const spark = new SparkMD5.ArrayBuffer();
+              spark.append(buffer);
+              const hash = spark.end();
+              resolve(hash);
+            };
+          });
+        },
+
+        // 文件切片
+        createFileChunks(file) {
+          const chunks = [];
+          let cur = 0;
+          while (cur < file.size) {
+            chunks.push({
+              index: chunks.length,
+              file: file.slice(cur, cur + CHUNK_SIZE),
+            });
+            cur += CHUNK_SIZE;
+          }
+          return chunks;
+        },
+
+        // 上传文件切片
+        async uploadChunks(chunks, hash) {
+          try {
+            const totalChunks = chunks.length;
+            let completedChunks = 0;
+            let totalProgress = 0;
+
+            const requests = chunks
+              .filter(chunk => !this.uploadedChunks.includes(`${hash}-${chunk.index}`)) // 过滤掉已上传的切片
+              .map((chunk, index) => {
+                const formData = new FormData();
+                formData.append('chunk', chunk.file);
+                const chunkHash = `${hash}-${chunk.index}`;
+
+                return axios.post('http://localhost:3000/api/upload', formData, {
+                  headers: {
+                    'X-File-Hash': hash,
+                    'X-Chunk-Hash': chunkHash,
+                    'Content-Type': 'multipart/form-data'
+                  }
+                }).then(() => {
+                  completedChunks++;
+                  this.uploadedChunks.push(chunkHash); // 记录已上传的切片
+                  // 更新总进度
+                  totalProgress = Math.round((completedChunks * 100) / totalChunks);
+                  this.uploadProgress = totalProgress;
+                });
+              });
+
+            const results = await Promise.all(requests);
+            return results;
+          } catch (error) {
+            console.error('上传失败:', error);
+            throw error;
+          }
+        },
+
+        // 验证文件是否已上传
+        async verifyUpload(hash, filename) {
+          try {
+            const { data } = await axios.post('http://localhost:3000/api/verify', {
+              hash,
+              filename,
+            });
+            return data;
+          } catch (error) {
+            console.error('校验文件失败:', error);
+            throw error;
+          }
+        },
+
+        // 合并文件
+        async mergeRequest(hash, filename) {
+          try {
+            const { data } = await axios.post('http://localhost:3000/api/merge', {
+              hash,
+              filename,
+              size: CHUNK_SIZE,
+            });
+            return data;
+          } catch (error) {
+            console.error('Merge error:', error);
+            throw error;
+          }
+        },
+
+        // 处理文件上传
+        async handleUpload() {
+          if (!this.file) return;
+
+          this.uploadStatus = UPLOAD_STATUS.UPLOADING;
+          this.controller = new AbortController();
+
+          try {
+            // 1. 计算文件hash
+            const hash = await this.calculateHash(this.file);
+            console.log('1: 当前文件 hash:', hash);
+
+            // 2. 验证文件是否已上传
+            const { uploaded, uploadedList } = await this.verifyUpload(hash, this.file.name);
+            console.log('2: 当前文件校验结果:', { uploaded, uploadedList });
+
+            if (uploaded) {
+              console.log('2.1: 文件已经上传过');
+              this.uploadStatus = UPLOAD_STATUS.SUCCESS;
+              return;
+            }
+
+            // 保存已上传的切片列表
+            this.uploadedChunks = uploadedList || [];
+
+            // 3. 文件切片
+            const chunks = this.createFileChunks(this.file);
+            console.log('3: 文件切片个数:', chunks.length);
+
+            // 4. 上传切片
+            console.log('4: 上传切片中...');
+            await this.uploadChunks(chunks, hash);
+
+            // 5. 合并文件
+            console.log('5: 文件合并中...');
+            await this.mergeRequest(hash, this.file.name);
+
+            console.log('6: 上传完成！');
+            this.uploadStatus = UPLOAD_STATUS.SUCCESS;
+          } catch (error) {
+            console.error('上传失败:', error);
+            this.uploadStatus = UPLOAD_STATUS.ERROR;
+          }
+        },
+
+        // 处理文件选择
+        handleFileChange(e) {
+          const file = e.target.files[0];
+          file && this.resetState(file);
+        },
+
+        resetState(file) {
+          this.file = file;
+          this.uploadedChunks = [];
+          this.uploadProgress = 0;
+          this.uploadStatus = UPLOAD_STATUS.READY;
+        },
+
+        // 处理按钮点击
+        handleButtonClick() {
+          switch (this.uploadStatus) {
+            case UPLOAD_STATUS.READY:
+            case UPLOAD_STATUS.ERROR:
+              this.handleUpload();
+              break;
+            case UPLOAD_STATUS.UPLOADING:
+              this.handlePause();
+              break;
+            case UPLOAD_STATUS.PAUSED:
+              this.handleResume();
+              break;
+          }
+        },
+
+        // 继续上传
+        handleResume() {
+          if (this.file) {
+            this.handleUpload();
+          }
+        },
+
+        // 暂停上传
+        handlePause() {
+          if (this.controller) {
+            this.controller.abort();
+            this.uploadStatus = UPLOAD_STATUS.PAUSED;
+          }
+        },
+
+        // 处理拖拽进入
+        handleDragEnter(e) {
+          this.isDragover = true;
+        },
+
+        // 处理拖拽离开
+        handleDragLeave(e) {
+          // 确保鼠标真的离开了容器，而不是进入了子元素
+          if (e.target === e.currentTarget) {
+            this.isDragover = false;
+          }
+        },
+
+        // 处理文件拖放
+        handleDrop(e) {
+          this.isDragover = false;
+          const files = e.dataTransfer.files;
+          if (files && files.length > 0) {
+            this.resetState(files[0]);
+          }
+        },
+
+
+      },
+    });
+  </script>
+</body>
+
+</html>
