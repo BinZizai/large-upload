@@ -5,7 +5,7 @@
 ## 启动
 
 - 前端：进入web/index.html --> 鼠标右键`Open with Live Server` (前提vscode安装了Live Server插件)
-- 服务端：cd server  --> `npm run dev`
+- 服务端：cd server  --> `npm install && npm run dev`
 
 
 ## 功能特点
@@ -115,7 +115,7 @@ this.uploadProgress = Math.round((completedChunks * 100) / totalChunks);
 
 ## 注意事项
 
-1. 需要后端配合实现以下接口：
+1. 后端接口：
    - `/api/upload`：上传文件切片
    - `/api/verify`：验证文件是否已存在
    - `/api/merge`：合并文件切片
